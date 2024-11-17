@@ -1,0 +1,19 @@
+---
+- name: Switch
+  hosts: webapp
+  become: true
+  tasks:
+    - name: Import switch
+      ansible.builtin.import_role:
+        name: web
+        tasks_from: switch
+
+- name: Deploy
+  hosts: webapp
+  become: true
+  become_user: isucon
+  tasks:
+    - name: Import deploy
+      ansible.builtin.import_role:
+        name: web
+        tasks_from: deploy

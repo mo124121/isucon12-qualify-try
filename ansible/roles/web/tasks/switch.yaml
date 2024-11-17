@@ -1,0 +1,15 @@
+- name: Update ExecStart to use Rust Docker Compose file
+  ansible.builtin.lineinfile:
+    path: /etc/systemd/system/isuports.service
+    regexp: "^ExecStart="
+    line: "ExecStart=docker compose -f docker-compose-rust.yml up --build"
+  notify:
+    - restart_webapp
+
+- name: Update ExecStop to use Rust Docker Compose file
+  ansible.builtin.lineinfile:
+    path: /etc/systemd/system/isuports.service
+    regexp: "^ExecStop="
+    line: "ExecStop=docker compose -f docker-compose-rust.yml down"
+  notify:
+    - restart_webapp

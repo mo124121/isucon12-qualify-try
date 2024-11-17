@@ -1,0 +1,9 @@
+- name: Copy webapp/rust from local to remote
+  ansible.posix.synchronize:
+    src: ../webapp/rust/
+    dest: /home/isucon/webapp/rust/
+    recursive: true
+    rsync_opts:
+      - "--exclude=target"
+  notify:
+    - restart_webapp

@@ -1,0 +1,31 @@
+all:
+  vars:
+    hosts_ips:
+      S1: isucon-server1
+      S2: isucon-server2
+      S3: isucon-server3
+      B: isucon-server4
+    nginx_ip: "{{ internal_ips.S1 }}"
+    db_ip: "{{ internal_ips.S1 }}"
+    main_web_ip: "{{ internal_ips.S1 }}"
+    ansible_user: ubuntu
+    ansible_ssh_private_key_file: ~/.ssh/wsl.pem
+  children:
+    target:
+      children:
+        nginx:
+          hosts:
+            nginx01:
+              ansible_host: "{{ hosts_ips.S1 }}"
+        webapp:
+          hosts:
+            webapp01:
+              ansible_host: "{{ hosts_ips.S1 }}"
+        db:
+          hosts:
+            db:
+              ansible_host: "{{ hosts_ips.S2 }}"
+    outsider:
+      hosts:
+        benchmarker:
+          ansible_host: "{{ hosts_ips.B }}"

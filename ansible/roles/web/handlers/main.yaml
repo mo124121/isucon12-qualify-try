@@ -1,0 +1,8 @@
+- name: Restart webapp
+  become: true
+  become_user: root
+  ansible.builtin.systemd:
+    name: isuports
+    state: restarted
+    daemon_reload: true
+  listen: restart_webapp
