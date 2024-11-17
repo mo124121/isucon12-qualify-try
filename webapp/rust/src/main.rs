@@ -136,30 +136,15 @@ async fn create_tenant_db(id: i64) -> Result<(), Error> {
 
 // システム全体で一意なIDを生成する
 async fn dispense_id(admin_db: &sqlx::MySqlPool) -> sqlx::Result<String> {
-    let mut last_err = None;
-    for _ in 1..100 {
-        match sqlx::query("REPLACE INTO id_generator (stub) VALUES (?);")
-            .bind("a")
-            .execute(admin_db)
-            .await
-        {
-            Ok(ret) => return Ok(format!("{:x}", ret.last_insert_id())),
-            Err(e) => {
-                if let Some(database_error) = e.as_database_error() {
-                    if let Some(merr) = database_error.try_downcast_ref::<MySqlDatabaseError>() {
-                        if merr.number() == 1213 {
-                            // deadlock
-                            last_err = Some(e);
-                            continue;
-                        }
-                    }
-                }
-                return Err(e);
-            }
-        }
+    // インサート処理
+    match sqlx::query("INSERT INTO id_generator (stub) VALUES (?);")
+        .bind("a")
+        .execute(admin_db)
+        .await
+    {
+        Ok(ret) => Ok(format!("{:x}", ret.last_insert_id())),
+        Err(e) => Err(e), // エラーが発生した場合、そのまま返す
     }
-
-    Err(last_err.unwrap())
 }
 
 #[actix_web::main]
@@ -1736,6 +1721,16 @@ async fn initialize_handler(admin_db: web::Data<sqlx::MySqlPool>) -> Result<Http
             return Err(Error::Sqlx(err));
         }
     }
+
+    //ユニーク制約の削除
+
+    utils::db::drop_unique_index_if_exists(
+        &admin_db,
+        &"id_generator".to_string(),
+        &"stub".to_string(),
+    )
+    .await?;
+
     // 測定開始
     let client = reqwest::Client::new();
     let _res = client

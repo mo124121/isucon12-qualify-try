@@ -7,3 +7,13 @@
       - "--exclude=target"
   notify:
     - restart_webapp
+
+- name: Deploy init files
+  ansible.builtin.copy:
+    src: "../{{ item }}"
+    dest: "/home/isucon/{{ item }}"
+    owner: isucon
+    group: isucon
+    mode: "0644"
+  with_items:
+    - webapp/sql/init.sql
