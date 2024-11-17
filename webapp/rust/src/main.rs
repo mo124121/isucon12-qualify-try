@@ -20,6 +20,8 @@ use tokio::fs;
 use tracing::error;
 use tracing_subscriber::prelude::*;
 
+pub mod utils;
+
 const TENANT_DB_SCHEMA_FILE_PATH: &str = "../sql/tenant/10_schema.sql";
 const INITIALIZE_SCRIPT: &str = "../sql/init.sh";
 const COOKIE_NAME: &str = "isuports_session";
@@ -1711,7 +1713,7 @@ struct InitializeHandlerResult {
 // POST /initialize
 // ベンチマーカーが起動したときに最初に呼ぶ
 // データベースの初期化などが実行されるため、スキーマを変更した場合などは適宜改変すること
-async fn initialize_handler() -> Result<HttpResponse, Error> {
+async fn initialize_handler(admin_db: web::Data<sqlx::MySqlPool>) -> Result<HttpResponse, Error> {
     let output = tokio::process::Command::new(INITIALIZE_SCRIPT)
         .output()
         .await
@@ -1725,6 +1727,14 @@ async fn initialize_handler() -> Result<HttpResponse, Error> {
             )
             .into(),
         ));
+    }
+    //DBのインデックス
+    let index_sqls =
+        vec!["CREATE INDEX tenant_competition_idx ON visit_history (tenant_id, competition_id);"];
+    for sql in &index_sqls {
+        if let Err(err) = utils::db::create_index_if_not_exists(&admin_db, sql).await {
+            return Err(Error::Sqlx(err));
+        }
     }
     // 測定開始
     let client = reqwest::Client::new();
