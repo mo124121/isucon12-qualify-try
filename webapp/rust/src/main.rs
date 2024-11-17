@@ -1716,20 +1716,26 @@ async fn initialize_handler() -> Result<HttpResponse, Error> {
         .output()
         .await
         .map_err(|e| Error::Internal(format!("error exec command: {}", e).into()))?;
-    if output.status.success() {
-        let res = InitializeHandlerResult { lang: "rust" };
-        Ok(HttpResponse::Ok().json(SuccessResult {
-            status: true,
-            data: res,
-        }))
-    } else {
-        Err(Error::Internal(
+    if !output.status.success() {
+        return Err(Error::Internal(
             format!(
                 "error exec command: out={}, err={}",
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
             )
             .into(),
-        ))
+        ));
     }
+    // 測定開始
+    let client = reqwest::Client::new();
+    let _res = client
+        .get("http://isucon-o11y:9000/api/group/collect")
+        .send()
+        .await;
+
+    let res = InitializeHandlerResult { lang: "rust" };
+    Ok(HttpResponse::Ok().json(SuccessResult {
+        status: true,
+        data: res,
+    }))
 }
