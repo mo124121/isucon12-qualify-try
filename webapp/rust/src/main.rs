@@ -742,7 +742,7 @@ async fn billing_report_by_competition(
         return Err(Error::Internal("error retrieve_competition".into()));
     }
     let comp = comp.unwrap();
-    let vhs: Vec<VisitHistorySummaryRow> = sqlx::query_as("SELECT player_id, MIN(created_at) AS min_created_at FROM visit_history WHERE tenant_id = ? AND competition_id = ? GROUP BY player_id")
+    let vhs: Vec<VisitHistorySummaryRow> = sqlx::query_as("SELECT player_id, MIN(created_at) AS min_created_at FROM visit_history FORCE INDEX(ranking_idx) WHERE tenant_id = ? AND competition_id = ? GROUP BY player_id")
         .bind(tenant_id)
         .bind(&comp.id)
         .fetch_all(admin_db)
@@ -1781,7 +1781,7 @@ async fn initialize_handler(admin_db: web::Data<sqlx::MySqlPool>) -> Result<Http
     }
     //DBのインデックス
     let index_sqls =
-        vec!["CREATE INDEX tenant_competition_idx ON visit_history (tenant_id, competition_id);"];
+        vec!["CREATE INDEX ranking_idx ON visit_history (tenant_id, competition_id, player_id, created_at);"];
     for sql in &index_sqls {
         if let Err(err) = utils::db::create_index_if_not_exists(&admin_db, sql).await {
             return Err(Error::Sqlx(err));
