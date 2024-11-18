@@ -150,7 +150,10 @@ async fn connect_to_tenant_db(id: i64) -> sqlx::Result<SqliteConnection> {
 
 async fn add_index_to_tenant_db(id: i64) -> sqlx::Result<()> {
     let mut db = connect_to_tenant_db(id).await?;
-    let queries = vec!["CREATE INDEX tenant_player_idx ON player_score (tenant_id, player_id);"];
+    let queries = vec![
+        "CREATE INDEX tenant_player_idx ON player_score (tenant_id, player_id);",
+        "CREATE INDEX tenant_comp_idx ON player_score (tenant_id, competition_id);",
+    ];
 
     for query in queries {
         sqlx::query(&query).execute(&mut db).await?;
@@ -1585,25 +1588,19 @@ async fn competition_ranking_handler(
 
     let rank_after = query.rank_after.unwrap_or(0);
 
-    let pss: Vec<PlayerScoreRow> = sqlx::query_as("SELECT * FROM player_score WHERE tenant_id = ? AND competition_id = ? ORDER BY row_num DESC")
-        .bind(tenant.id)
-        .bind(&competition_id)
-        .fetch_all(&mut tenant_db)
-        .await?;
+    let pss: Vec<PlayerScoreRow> =
+        sqlx::query_as("SELECT * FROM player_score WHERE tenant_id = ? AND competition_id = ?")
+            .bind(tenant.id)
+            .bind(&competition_id)
+            .fetch_all(&mut tenant_db)
+            .await?;
     let mut ranks = Vec::with_capacity(pss.len());
-    let mut scored_player_set = HashSet::with_capacity(pss.len());
     for ps in pss {
-        // player_scoreが同一player_id内ではrow_numの降順でソートされているので
-        // 現れたのが2回目以降のplayer_idはより大きいrow_numでスコアが出ているとみなせる
-        if scored_player_set.contains(&ps.player_id) {
-            continue;
-        }
         let p = retrieve_player(&mut tenant_db, &ps.player_id).await?;
         if p.is_none() {
             return Err(Error::Internal("error retrieve_player".into()));
         }
         let p = p.unwrap();
-        scored_player_set.insert(ps.player_id);
         ranks.push(CompetitionRank {
             rank: 0,
             score: ps.score,
