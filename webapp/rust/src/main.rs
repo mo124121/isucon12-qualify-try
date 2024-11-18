@@ -461,7 +461,7 @@ struct PlayerRow {
 async fn get_player_row(db: &mut SqliteConnection, id: &str) -> sqlx::Result<Option<PlayerRow>> {
     {
         let cache = PLAYER_CACHE.lock().await;
-        if let Some(player) = cache.get(id) {
+        if let Some(player) = cache.get(&id.to_string()) {
             return Ok(Some(player.clone()));
         }
     }
@@ -471,7 +471,11 @@ async fn get_player_row(db: &mut SqliteConnection, id: &str) -> sqlx::Result<Opt
         .await?;
 
     match player {
-        Some(player) => Ok(Some(player)),
+        Some(player) => {
+            let mut cache = PLAYER_CACHE.lock().await;
+            cache.insert(id.to_string(), player.clone());
+            Ok(Some(player))
+        }
         None => Ok(None),
     }
 }
