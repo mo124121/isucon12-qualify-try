@@ -592,7 +592,7 @@ async fn retrieve_competition(
     }
 }
 
-#[derive(Debug, sqlx::FromRow)]
+#[derive(Debug, sqlx::FromRow, Clone)]
 struct PlayerScoreRow {
     tenant_id: i64,
     id: String,
@@ -1280,7 +1280,8 @@ async fn competition_score_handler(
         }
     }
 
-    let mut player_score_rows = Vec::new();
+    let mut rows: i64 = 0;
+    let mut row_map: HashMap<String, PlayerScoreRow> = HashMap::new();
     for (row_num, row) in rdr.into_records().enumerate() {
         let row = row?;
         if row.len() != 2 {
@@ -1311,7 +1312,7 @@ async fn competition_score_handler(
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs() as i64;
-        player_score_rows.push(PlayerScoreRow {
+        let row = PlayerScoreRow {
             id,
             tenant_id: v.tenant_id,
             player_id: player_id.to_owned(),
@@ -1320,8 +1321,11 @@ async fn competition_score_handler(
             row_num: row_num as i64,
             created_at: now,
             updated_at: now,
-        });
+        };
+        row_map.insert(player_id.to_string(), row.clone());
+        rows += 1;
     }
+    let player_score_rows: Vec<PlayerScoreRow> = row_map.values().cloned().collect();
 
     let mut tx = tenant_db.begin().await?;
     sqlx::query("DELETE FROM player_score WHERE tenant_id = ? AND competition_id = ?")
@@ -1330,7 +1334,6 @@ async fn competition_score_handler(
         .execute(&mut tx)
         .await?;
 
-    let rows = player_score_rows.len() as i64;
     let mut query_builder:QueryBuilder<sqlx::Sqlite> = QueryBuilder::new("INSERT INTO player_score (id, tenant_id, player_id, competition_id, score, row_num, created_at, updated_at) ");
     query_builder.push_values(player_score_rows, |mut b, ps| {
         b.push_bind(ps.id)
@@ -1437,26 +1440,13 @@ async fn player_handler(
             ));
         }
     };
-    let cs: Vec<CompetitionRow> =
-        sqlx::query_as("SELECT * FROM competition WHERE tenant_id = ? ORDER BY created_at ASC")
+
+    let pss: Vec<PlayerScoreRow> =
+        sqlx::query_as("SELECT * FROM player_score WHERE tenant_id = ? AND player_id = ?")
             .bind(v.tenant_id)
+            .bind(&p.id)
             .fetch_all(&mut tenant_db)
             .await?;
-
-    let mut pss = Vec::with_capacity(cs.len());
-    for c in cs {
-        // 最後にCSVに登場したスコアを採用する = row_numが一番大きいもの
-        let ps: Option<PlayerScoreRow> = sqlx::query_as("SELECT * FROM player_score WHERE tenant_id = ? AND competition_id = ? AND player_id = ? ORDER BY row_num DESC LIMIT 1")
-            .bind(v.tenant_id)
-            .bind(c.id)
-            .bind(&p.id)
-            .fetch_optional(&mut tenant_db)
-            .await?;
-        if let Some(ps) = ps {
-            pss.push(ps);
-        }
-        // 行がない = スコアが記録されてない
-    }
 
     let mut psds = Vec::with_capacity(pss.len());
     for ps in pss {
