@@ -11,7 +11,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sqlx::mysql::{MySqlConnectOptions, MySqlDatabaseError};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteConnection};
-use sqlx::Connection;
+use sqlx::{Connection, MySqlConnection};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -36,6 +36,8 @@ const ROLE_PLAYER: &str = "player";
 static PLAYER_CACHE: LazyLock<Mutex<HashMap<String, PlayerRow>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static COMPETITION_CACHE: LazyLock<Mutex<HashMap<(i64, String), CompetitionRow>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+static TENANT_CACHE: LazyLock<Mutex<HashMap<i64, TenantRow>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 lazy_static! {
@@ -477,7 +479,7 @@ async fn retrieve_tenant_row_from_header(
         .await
 }
 
-#[derive(Debug, sqlx::FromRow)]
+#[derive(Debug, sqlx::FromRow, Clone)]
 struct TenantRow {
     id: i64,
     name: String,
@@ -1503,6 +1505,26 @@ struct CompetitionRankingHandlerQuery {
     rank_after: Option<i64>,
 }
 
+async fn get_tenant_row(db: &mut MySqlConnection, id: i64) -> sqlx::Result<TenantRow> {
+    {
+        let cache = TENANT_CACHE.lock().await;
+        if let Some(item) = cache.get(&id) {
+            return Ok(item.clone());
+        }
+    }
+
+    let item: TenantRow = sqlx::query_as("SELECT * FROM tenant WHERE id = ?")
+        .bind(id)
+        .fetch_one(&mut *db)
+        .await?;
+
+    {
+        let mut cache = TENANT_CACHE.lock().await;
+        cache.insert(id, item.clone());
+    }
+    Ok(item)
+}
+
 // 参加者向けAPI
 // GET /api/player/competition/:competition_id/ranking
 // 大会ごとのランキングを取得する
@@ -1542,10 +1564,10 @@ async fn competition_ranking_handler(
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs() as i64;
-    let tenant: TenantRow = sqlx::query_as("SELECT * FROM tenant WHERE id = ?")
-        .bind(v.tenant_id)
-        .fetch_one(&**admin_db)
-        .await?;
+
+    let mut tx = admin_db.begin().await?;
+
+    let tenant = get_tenant_row(&mut tx, v.tenant_id).await?;
 
     sqlx::query("INSERT INTO visit_history (player_id, tenant_id, competition_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?)")
         .bind(v.player_id)
@@ -1553,8 +1575,10 @@ async fn competition_ranking_handler(
         .bind(&competition_id)
         .bind(now)
         .bind(now)
-        .execute(&**admin_db)
+        .execute(&mut tx)
         .await?;
+
+    tx.commit().await?;
 
     let rank_after = query.rank_after.unwrap_or(0);
 
@@ -1828,6 +1852,8 @@ async fn initialize_handler(admin_db: web::Data<sqlx::MySqlPool>) -> Result<Http
         let mut cache = PLAYER_CACHE.lock().await;
         cache.clear();
         let mut cache = COMPETITION_CACHE.lock().await;
+        cache.clear();
+        let mut cache = TENANT_CACHE.lock().await;
         cache.clear();
     }
 
