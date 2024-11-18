@@ -11,7 +11,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sqlx::mysql::{MySqlConnectOptions, MySqlDatabaseError};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteConnection};
-use sqlx::{Connection, Execute, MySqlConnection, QueryBuilder};
+use sqlx::{query, Connection, Execute, MySqlConnection, QueryBuilder};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -1828,6 +1828,21 @@ async fn initialize_handler(admin_db: web::Data<sqlx::MySqlPool>) -> Result<Http
             .into(),
         ));
     }
+    //DBの圧縮
+    let queries = vec![
+        "DROP TABLE IF EXISTS visit_history_tmp;",
+        "create table visit_history_tmp as select * from visit_history where 1=2;",
+        r#"INSERT into visit_history_tmp select player_id, tenant_id, competition_id,
+  min(created_at) as created_at, min(updated_at) as updated_at
+  from visit_history group by player_id, tenant_id, competition_id;"#,
+        "truncate visit_history;",
+        "INSERT INTO visit_history select * FROM visit_history_tmp;",
+        "DROP TABLE visit_history_tmp;",
+    ];
+    for query in queries {
+        sqlx::query(&query).execute(&**admin_db).await?;
+    }
+
     //DBのインデックス
     let index_sqls =
         vec!["CREATE INDEX ranking_idx ON visit_history (tenant_id, competition_id, player_id, created_at);"];
