@@ -19,6 +19,7 @@ use std::sync::LazyLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::fs;
 use tokio::sync::Mutex;
+use tokio::time::Instant;
 use tracing::error;
 use tracing_subscriber::prelude::*;
 
@@ -38,6 +39,47 @@ static PLAYER_CACHE: LazyLock<Mutex<HashMap<String, PlayerRow>>> =
 lazy_static! {
     // 正しいテナント名の正規表現
     static ref TENANT_NAME_REGEXP: Regex = Regex::new(r"^[a-z][a-z0-9-]{0,61}[a-z0-9]$").unwrap();
+}
+
+// https://zenn.dev/tipstar0125/articles/245bceec86e40a#%E3%83%A2%E3%82%B8%E3%83%A5%E3%83%BC%E3%83%AB
+mod rnd {
+    use rand::Rng;
+    static mut S: usize = 0;
+    static MAX: usize = 1e9 as usize;
+
+    #[inline]
+    pub fn init(seed: usize) {
+        unsafe {
+            if seed == 0 {
+                S = rand::thread_rng().gen();
+            } else {
+                S = seed;
+            }
+        }
+    }
+    #[inline]
+    pub fn gen() -> usize {
+        unsafe {
+            if S == 0 {
+                init(0);
+            }
+            S ^= S << 7;
+            S ^= S >> 9;
+            S
+        }
+    }
+    #[inline]
+    pub fn gen_range(a: usize, b: usize) -> usize {
+        gen() % (b - a) + a
+    }
+    #[inline]
+    pub fn gen_bool() -> bool {
+        gen() & 1 == 1
+    }
+    #[inline]
+    pub fn gen_float() -> f64 {
+        ((gen() % MAX) as f64) / MAX as f64
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -141,15 +183,9 @@ async fn create_tenant_db(id: i64) -> Result<(), Error> {
 
 // システム全体で一意なIDを生成する
 async fn dispense_id(admin_db: &sqlx::MySqlPool) -> sqlx::Result<String> {
-    // インサート処理
-    match sqlx::query("INSERT INTO id_generator (stub) VALUES (?);")
-        .bind("a")
-        .execute(admin_db)
-        .await
-    {
-        Ok(ret) => Ok(format!("{:x}", ret.last_insert_id())),
-        Err(e) => Err(e), // エラーが発生した場合、そのまま返す
-    }
+    let now = Instant::now().elapsed().as_nanos();
+    let id = format!("{}-{}", now, rnd::gen_float());
+    return Ok(id);
 }
 
 #[actix_web::main]
@@ -458,6 +494,7 @@ struct PlayerRow {
     updated_at: i64,
 }
 
+//バグってるかも？テナントが違う同じユーザがくるとまずいかも
 async fn get_player_row(db: &mut SqliteConnection, id: &str) -> sqlx::Result<Option<PlayerRow>> {
     {
         let cache = PLAYER_CACHE.lock().await;

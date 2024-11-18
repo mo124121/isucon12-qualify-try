@@ -1193,6 +1193,7 @@ dependencies = [
  "listenfd",
  "nix 0.24.2",
  "pprof-integration",
+ "rand",
  "regex",
  "reqwest",
  "serde",
