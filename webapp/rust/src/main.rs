@@ -33,6 +33,8 @@ const ROLE_ADMIN: &str = "admin";
 const ROLE_ORGANIZER: &str = "organizer";
 const ROLE_PLAYER: &str = "player";
 
+static TIME: LazyLock<Mutex<Instant>> = LazyLock::new(|| Mutex::new(Instant::now()));
+
 static PLAYER_CACHE: LazyLock<Mutex<HashMap<String, PlayerRow>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static COMPETITION_CACHE: LazyLock<Mutex<HashMap<(i64, String), CompetitionRow>>> =
@@ -186,10 +188,14 @@ async fn create_tenant_db(id: i64) -> Result<(), Error> {
 }
 
 // システム全体で一意なIDを生成する
-async fn dispense_id(admin_db: &sqlx::MySqlPool) -> sqlx::Result<String> {
-    let now = Instant::now().elapsed().as_nanos();
-    let id = format!("{}-{}", now, rnd::gen_range(1, 1000000));
-    return Ok(id);
+async fn dispense_id() -> sqlx::Result<String> {
+    {
+        let t = TIME.lock().await;
+
+        let now = t.elapsed().as_nanos();
+        let id = format!("{}-{}", now, rnd::gen_range(1, 1000000));
+        return Ok(id);
+    }
 }
 
 #[actix_web::main]
@@ -778,9 +784,6 @@ async fn billing_report_by_competition(
         billing_map.insert(vh.player_id, "visitor");
     }
 
-    // player_scoreを読んでいる時に更新が走ると不整合が起こるのでロックを取得する
-    let _fl = flock_by_tenant_id(tenant_id).await?;
-
     // スコアを登録した参加者のIDを取得する
     sqlx::query_as(
         "SELECT DISTINCT(player_id) FROM player_score WHERE tenant_id = ? AND competition_id = ?",
@@ -987,7 +990,7 @@ async fn players_add_handler(
 
     let mut pds = Vec::new();
     for display_name in display_names {
-        let id = dispense_id(&admin_db).await?;
+        let id = dispense_id().await?;
 
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1124,7 +1127,7 @@ async fn competitions_add_handler(
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs() as i64;
-    let id = dispense_id(&admin_db).await?;
+    let id = dispense_id().await?;
 
     sqlx::query("INSERT INTO competition (id, tenant_id, title, finished_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)")
         .bind(&id)
@@ -1305,7 +1308,7 @@ async fn competition_score_handler(
                 ));
             }
         };
-        let id = dispense_id(&admin_db).await?;
+        let id = dispense_id().await?;
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -1322,12 +1325,11 @@ async fn competition_score_handler(
         });
     }
 
-    // DELETEしたタイミングで参照が来ると空っぽのランキングになるのでロックする
-    let _fl = flock_by_tenant_id(v.tenant_id).await?;
+    let mut tx = tenant_db.begin().await?;
     sqlx::query("DELETE FROM player_score WHERE tenant_id = ? AND competition_id = ?")
         .bind(v.tenant_id)
         .bind(&competition_id)
-        .execute(&mut tenant_db)
+        .execute(&mut tx)
         .await?;
 
     let rows = player_score_rows.len() as i64;
@@ -1344,7 +1346,9 @@ async fn competition_score_handler(
     });
 
     let query = query_builder.build();
-    query.execute(&mut tenant_db).await?;
+    query.execute(&mut tx).await?;
+
+    tx.commit().await?;
 
     Ok(HttpResponse::Ok().json(SuccessResult {
         status: true,
@@ -1441,8 +1445,6 @@ async fn player_handler(
             .fetch_all(&mut tenant_db)
             .await?;
 
-    // player_scoreを読んでいるときに更新が走ると不整合が起こるのでロックを取得する
-    let _fl = flock_by_tenant_id(v.tenant_id).await?;
     let mut pss = Vec::with_capacity(cs.len());
     for c in cs {
         // 最後にCSVに登場したスコアを採用する = row_numが一番大きいもの
@@ -1583,8 +1585,6 @@ async fn competition_ranking_handler(
 
     let rank_after = query.rank_after.unwrap_or(0);
 
-    // player_scoreを読んでいるときに更新が走ると不整合が起こるのでロックを取得する
-    let _fl = flock_by_tenant_id(v.tenant_id).await?;
     let pss: Vec<PlayerScoreRow> = sqlx::query_as("SELECT * FROM player_score WHERE tenant_id = ? AND competition_id = ? ORDER BY row_num DESC")
         .bind(tenant.id)
         .bind(&competition_id)
