@@ -11,12 +11,14 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sqlx::mysql::{MySqlConnectOptions, MySqlDatabaseError};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteConnection};
-use sqlx::Connection as _;
+use sqlx::Connection;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::LazyLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::fs;
+use tokio::sync::Mutex;
 use tracing::error;
 use tracing_subscriber::prelude::*;
 
@@ -29,6 +31,9 @@ const COOKIE_NAME: &str = "isuports_session";
 const ROLE_ADMIN: &str = "admin";
 const ROLE_ORGANIZER: &str = "organizer";
 const ROLE_PLAYER: &str = "player";
+
+static PLAYER_CACHE: LazyLock<Mutex<HashMap<String, PlayerRow>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 lazy_static! {
     // 正しいテナント名の正規表現
@@ -443,7 +448,7 @@ struct TenantRow {
     updated_at: i64,
 }
 
-#[derive(Debug, sqlx::FromRow)]
+#[derive(Debug, sqlx::FromRow, Clone)]
 struct PlayerRow {
     tenant_id: i64,
     id: String,
@@ -453,15 +458,30 @@ struct PlayerRow {
     updated_at: i64,
 }
 
+async fn get_player_row(db: &mut SqliteConnection, id: &str) -> sqlx::Result<Option<PlayerRow>> {
+    {
+        let cache = PLAYER_CACHE.lock().await;
+        if let Some(player) = cache.get(id) {
+            return Ok(Some(player.clone()));
+        }
+    }
+    let player: Option<PlayerRow> = sqlx::query_as("SELECT * FROM player WHERE id = ?")
+        .bind(id)
+        .fetch_optional(db)
+        .await?;
+
+    match player {
+        Some(player) => Ok(Some(player)),
+        None => Ok(None),
+    }
+}
+
 // 参加者を取得する
 async fn retrieve_player(
     tenant_db: &mut SqliteConnection,
     id: &str,
 ) -> sqlx::Result<Option<PlayerRow>> {
-    sqlx::query_as("SELECT * FROM player WHERE id = ?")
-        .bind(id)
-        .fetch_optional(tenant_db)
-        .await
+    get_player_row(tenant_db, id).await
 }
 
 // 参加者を認可する
@@ -974,6 +994,10 @@ async fn player_disqualified_handler(
         .bind(&player_id)
         .execute(&mut tenant_db)
         .await?;
+    {
+        let mut cache = PLAYER_CACHE.lock().await;
+        cache.remove(&player_id);
+    }
     let p = retrieve_player(&mut tenant_db, &player_id).await?;
     if p.is_none() {
         // 存在しないプレイヤー
@@ -1724,13 +1748,18 @@ async fn initialize_handler(admin_db: web::Data<sqlx::MySqlPool>) -> Result<Http
     }
 
     //ユニーク制約の削除
-
     utils::db::drop_unique_index_if_exists(
         &admin_db,
         &"id_generator".to_string(),
         &"stub".to_string(),
     )
     .await?;
+
+    //cacheのクリア
+    {
+        let mut cache = PLAYER_CACHE.lock().await;
+        cache.clear();
+    }
 
     // 測定開始
     let client = reqwest::Client::new();
