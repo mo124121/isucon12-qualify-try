@@ -35,6 +35,8 @@ const ROLE_PLAYER: &str = "player";
 
 static PLAYER_CACHE: LazyLock<Mutex<HashMap<String, PlayerRow>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+static COMPETITION_CACHE: LazyLock<Mutex<HashMap<(i64, String), CompetitionRow>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 lazy_static! {
     // 正しいテナント名の正規表現
@@ -184,7 +186,7 @@ async fn create_tenant_db(id: i64) -> Result<(), Error> {
 // システム全体で一意なIDを生成する
 async fn dispense_id(admin_db: &sqlx::MySqlPool) -> sqlx::Result<String> {
     let now = Instant::now().elapsed().as_nanos();
-    let id = format!("{}-{}", now, rnd::gen_float());
+    let id = format!("{}-{}", now, rnd::gen_range(1, 1000000));
     return Ok(id);
 }
 
@@ -546,7 +548,7 @@ async fn authorize_player(tenant_db: &mut SqliteConnection, id: &str) -> Result<
     Ok(())
 }
 
-#[derive(Debug, sqlx::FromRow)]
+#[derive(Debug, sqlx::FromRow, Clone)]
 struct CompetitionRow {
     tenant_id: i64,
     id: String,
@@ -560,11 +562,28 @@ struct CompetitionRow {
 async fn retrieve_competition(
     tenant_db: &mut SqliteConnection,
     id: &str,
+    tenant_id: i64,
 ) -> sqlx::Result<Option<CompetitionRow>> {
-    sqlx::query_as("SELECT * FROM competition WHERE id = ?")
+    {
+        let cache = COMPETITION_CACHE.lock().await;
+        if let Some(item) = cache.get(&(tenant_id, id.to_string())) {
+            return Ok(Some(item.clone()));
+        }
+    }
+
+    let item: Option<CompetitionRow> = sqlx::query_as("SELECT * FROM competition WHERE id = ?")
         .bind(id)
         .fetch_optional(tenant_db)
-        .await
+        .await?;
+
+    match item {
+        Some(item) => {
+            let mut cache = COMPETITION_CACHE.lock().await;
+            cache.insert((tenant_id, id.to_string()), item.clone());
+            Ok(Some(item))
+        }
+        None => Ok(None),
+    }
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -737,7 +756,7 @@ async fn billing_report_by_competition(
     tenant_id: i64,
     competition_id: &str,
 ) -> Result<BillingReport, Error> {
-    let comp = retrieve_competition(tenant_db, competition_id).await?;
+    let comp = retrieve_competition(tenant_db, competition_id, tenant_id).await?;
     if comp.is_none() {
         return Err(Error::Internal("error retrieve_competition".into()));
     }
@@ -1147,7 +1166,10 @@ async fn competition_finish_handler(
     let mut tenant_db = connect_to_tenant_db(v.tenant_id).await?;
 
     let (id,) = params.into_inner();
-    if retrieve_competition(&mut tenant_db, &id).await?.is_none() {
+    if retrieve_competition(&mut tenant_db, &id, v.tenant_id)
+        .await?
+        .is_none()
+    {
         // 存在しない大会
         return Err(Error::Custom(
             StatusCode::NOT_FOUND,
@@ -1162,9 +1184,13 @@ async fn competition_finish_handler(
     sqlx::query("UPDATE competition SET finished_at = ?, updated_at=? WHERE id = ?")
         .bind(now)
         .bind(now)
-        .bind(id)
+        .bind(id.clone())
         .execute(&mut tenant_db)
         .await?;
+    {
+        let mut cache = COMPETITION_CACHE.lock().await;
+        cache.remove(&(v.tenant_id, id));
+    }
 
     let res = SuccessResult {
         status: true,
@@ -1203,7 +1229,7 @@ async fn competition_score_handler(
     let mut tenant_db = connect_to_tenant_db(v.tenant_id).await?;
 
     let (competition_id,) = params.into_inner();
-    let comp = match retrieve_competition(&mut tenant_db, &competition_id).await? {
+    let comp = match retrieve_competition(&mut tenant_db, &competition_id, v.tenant_id).await? {
         Some(c) => c,
         None => {
             // 存在しない大会
@@ -1431,7 +1457,7 @@ async fn player_handler(
 
     let mut psds = Vec::with_capacity(pss.len());
     for ps in pss {
-        let comp = retrieve_competition(&mut tenant_db, &ps.competition_id).await?;
+        let comp = retrieve_competition(&mut tenant_db, &ps.competition_id, v.tenant_id).await?;
         if comp.is_none() {
             return Err(Error::Internal("error retrieve_competition".into()));
         }
@@ -1501,15 +1527,16 @@ async fn competition_ranking_handler(
     let (competition_id,) = params.into_inner();
 
     // 大会の存在確認
-    let competition = match retrieve_competition(&mut tenant_db, &competition_id).await? {
-        Some(c) => c,
-        None => {
-            return Err(Error::Custom(
-                StatusCode::NOT_FOUND,
-                "competition not found".into(),
-            ));
-        }
-    };
+    let competition =
+        match retrieve_competition(&mut tenant_db, &competition_id, v.tenant_id).await? {
+            Some(c) => c,
+            None => {
+                return Err(Error::Custom(
+                    StatusCode::NOT_FOUND,
+                    "competition not found".into(),
+                ));
+            }
+        };
 
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1799,6 +1826,8 @@ async fn initialize_handler(admin_db: web::Data<sqlx::MySqlPool>) -> Result<Http
     //cacheのクリア
     {
         let mut cache = PLAYER_CACHE.lock().await;
+        cache.clear();
+        let mut cache = COMPETITION_CACHE.lock().await;
         cache.clear();
     }
 
