@@ -256,6 +256,7 @@ pub async fn main() -> std::io::Result<()> {
                     .service(admin_api)
                     .service(organizer_api)
                     .service(player_api)
+                    .configure(pprof_integration::frameworks::actix_web::configure)
                     // 全ロール及び未認証でも使えるhandler
                     .route("/me", web::get().to(me_handler)),
             )
