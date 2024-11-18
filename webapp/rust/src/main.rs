@@ -189,13 +189,11 @@ async fn create_tenant_db(id: i64) -> Result<(), Error> {
 
 // システム全体で一意なIDを生成する
 async fn dispense_id() -> sqlx::Result<String> {
-    {
-        let t = TIME.lock().await;
+    let t = TIME.lock().await;
 
-        let now = t.elapsed().as_nanos();
-        let id = format!("{}-{}", now, rnd::gen_range(1, 1000000));
-        return Ok(id);
-    }
+    let now = t.elapsed().as_nanos();
+    let id = format!("{}-{}", now, rnd::gen_range(1, 1000000));
+    return Ok(id);
 }
 
 #[actix_web::main]
