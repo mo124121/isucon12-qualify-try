@@ -11,7 +11,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sqlx::mysql::{MySqlConnectOptions, MySqlDatabaseError};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteConnection};
-use sqlx::{Connection, MySqlConnection};
+use sqlx::{Connection, Execute, MySqlConnection, QueryBuilder};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -1279,8 +1279,6 @@ async fn competition_score_handler(
         }
     }
 
-    // DELETEしたタイミングで参照が来ると空っぽのランキングになるのでロックする
-    let _fl = flock_by_tenant_id(v.tenant_id).await?;
     let mut player_score_rows = Vec::new();
     for (row_num, row) in rdr.into_records().enumerate() {
         let row = row?;
@@ -1324,6 +1322,8 @@ async fn competition_score_handler(
         });
     }
 
+    // DELETEしたタイミングで参照が来ると空っぽのランキングになるのでロックする
+    let _fl = flock_by_tenant_id(v.tenant_id).await?;
     sqlx::query("DELETE FROM player_score WHERE tenant_id = ? AND competition_id = ?")
         .bind(v.tenant_id)
         .bind(&competition_id)
@@ -1331,19 +1331,20 @@ async fn competition_score_handler(
         .await?;
 
     let rows = player_score_rows.len() as i64;
-    for ps in player_score_rows {
-        sqlx::query("INSERT INTO player_score (id, tenant_id, player_id, competition_id, score, row_num, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
-            .bind(ps.id)
-            .bind(ps.tenant_id)
-            .bind(ps.player_id)
-            .bind(ps.competition_id)
-            .bind(ps.score)
-            .bind(ps.row_num)
-            .bind(ps.created_at)
-            .bind(ps.updated_at)
-            .execute(&mut tenant_db)
-            .await?;
-    }
+    let mut query_builder:QueryBuilder<sqlx::Sqlite> = QueryBuilder::new("INSERT INTO player_score (id, tenant_id, player_id, competition_id, score, row_num, created_at, updated_at) ");
+    query_builder.push_values(player_score_rows, |mut b, ps| {
+        b.push_bind(ps.id)
+            .push_bind(ps.tenant_id)
+            .push_bind(ps.player_id)
+            .push_bind(ps.competition_id)
+            .push_bind(ps.score)
+            .push_bind(ps.row_num)
+            .push_bind(ps.created_at)
+            .push_bind(ps.updated_at);
+    });
+
+    let query = query_builder.build();
+    query.execute(&mut tenant_db).await?;
 
     Ok(HttpResponse::Ok().json(SuccessResult {
         status: true,
