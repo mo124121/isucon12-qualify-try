@@ -148,6 +148,17 @@ async fn connect_to_tenant_db(id: i64) -> sqlx::Result<SqliteConnection> {
     SqliteConnection::connect_with(&SqliteConnectOptions::new().filename(p)).await
 }
 
+async fn add_index_to_tenant_db(id: i64) -> sqlx::Result<()> {
+    let mut db = connect_to_tenant_db(id).await?;
+    let queries = vec!["CREATE INDEX tenant_player_idx ON player_score (tenant_id, player_id);"];
+
+    for query in queries {
+        sqlx::query(&query).execute(&mut db).await?;
+    }
+
+    Ok(())
+}
+
 // テナントDBを新規に作成する
 async fn create_tenant_db(id: i64) -> Result<(), Error> {
     let p = tenant_db_path(id);
@@ -712,6 +723,7 @@ async fn tenants_add_handler(
     //       /api/admin/tenants/billingにアクセスされるとエラーになりそう
     //       ロックなどで対処したほうが良さそう
     create_tenant_db(id as i64).await?;
+    add_index_to_tenant_db(id as i64).await?;
     let res = TenantsAddHandlerResult {
         tenant: TenantWithBilling {
             id: id.to_string(),
@@ -1826,6 +1838,9 @@ async fn initialize_handler(admin_db: web::Data<sqlx::MySqlPool>) -> Result<Http
         if let Err(err) = utils::db::create_index_if_not_exists(&admin_db, sql).await {
             return Err(Error::Sqlx(err));
         }
+    }
+    for i in 1..=100 {
+        add_index_to_tenant_db(i).await?;
     }
 
     //ユニーク制約の削除
