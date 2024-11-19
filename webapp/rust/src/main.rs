@@ -155,7 +155,7 @@ async fn add_index_to_tenant_db(id: i64) -> sqlx::Result<()> {
     let mut db = connect_to_tenant_db(id).await?;
     let queries = vec![
         "CREATE INDEX tenant_player_idx ON player_score (tenant_id, player_id);",
-        "CREATE INDEX tenant_comp_idx ON player_score (tenant_id, competition_id);",
+        "CREATE INDEX ranking_idx ON player_score (tenant_id, competition_id, score DESC, row_num);",
     ];
 
     for query in queries {
@@ -1685,41 +1685,51 @@ async fn competition_ranking_handler(
 
     let rank_after = query.rank_after.unwrap_or(0);
 
-    let pss: Vec<PlayerScoreRow> =
-        sqlx::query_as("SELECT * FROM player_score WHERE tenant_id = ? AND competition_id = ?")
-            .bind(tenant.id)
-            .bind(&competition_id)
-            .fetch_all(&mut tenant_db)
-            .await?;
-    let mut ranks = Vec::with_capacity(pss.len());
-    for ps in pss {
-        let p = retrieve_player(&mut tenant_db, &ps.player_id).await?;
-        if p.is_none() {
-            return Err(Error::Internal("error retrieve_player".into()));
-        }
-        let p = p.unwrap();
-        ranks.push(CompetitionRank {
-            rank: 0,
-            score: ps.score,
-            player_id: p.id,
-            player_display_name: p.display_name,
-            row_num: ps.row_num,
-        })
-    }
-    ranks.sort_by(|a, b| b.score.cmp(&a.score).then(a.row_num.cmp(&b.row_num)));
+    let pss: Vec<PlayerScoreRow> = sqlx::query_as(
+        "SELECT * FROM player_score WHERE tenant_id = ? AND competition_id = ? ORDER BY score DESC, row_num ASC",
+    )
+    .bind(tenant.id)
+    .bind(&competition_id)
+    .fetch_all(&mut tenant_db)
+    .await?;
     let mut paged_ranks = Vec::with_capacity(100);
-    for (i, rank) in ranks.into_iter().enumerate() {
+
+    if (pss.len() as i64) < rank_after {
+        let res = SuccessResult {
+            status: true,
+            data: CompetitionRankingHandlerResult {
+                competition: CompetitionDetail {
+                    id: competition.id,
+                    title: competition.title,
+                    is_finished: competition.finished_at.is_some(),
+                },
+                ranks: paged_ranks,
+            },
+        };
+
+        return Ok(HttpResponse::Ok().json(res));
+    }
+
+    for (i, ps) in pss.iter().enumerate() {
         let i = i as i64;
         if i < rank_after {
             continue;
         }
-        paged_ranks.push(CompetitionRank {
-            rank: i + 1,
-            score: rank.score,
-            player_id: rank.player_id,
-            player_display_name: rank.player_display_name,
-            row_num: 0,
-        });
+        match retrieve_player(&mut tenant_db, &ps.player_id).await? {
+            Some(p) => {
+                paged_ranks.push(CompetitionRank {
+                    rank: i + 1,
+                    score: ps.score,
+                    player_id: p.id,
+                    player_display_name: p.display_name,
+                    row_num: 0,
+                });
+            }
+            None => {
+                return Err(Error::Internal("error retrieve_player".into()));
+            }
+        }
+
         if paged_ranks.len() >= 100 {
             break;
         }
