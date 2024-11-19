@@ -41,6 +41,8 @@ static COMPETITION_CACHE: LazyLock<Mutex<HashMap<(i64, String), CompetitionRow>>
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static TENANT_CACHE: LazyLock<Mutex<HashMap<i64, TenantRow>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+static TENANT_NAME_CACHE: LazyLock<Mutex<HashMap<String, TenantRow>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 static VISIT_HISTORY_CACHE: LazyLock<Mutex<HashMap<(String, i64, String), i64>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 lazy_static! {
@@ -468,6 +470,30 @@ async fn parse_viewer(admin_db: &sqlx::MySqlPool, request: &HttpRequest) -> Resu
     })
 }
 
+async fn get_tenant_row_from_name(
+    admin_db: &sqlx::MySqlPool,
+    tenant_name: String,
+) -> sqlx::Result<Option<TenantRow>> {
+    {
+        let cache = TENANT_NAME_CACHE.lock().await;
+        if let Some(item) = cache.get(&tenant_name) {
+            return Ok(Some(item.clone()));
+        }
+    }
+    let item: Option<TenantRow> = sqlx::query_as("SELECT * FROM tenant WHERE name = ?")
+        .bind(&tenant_name)
+        .fetch_optional(admin_db)
+        .await?;
+    match item {
+        Some(item) => {
+            let mut cache = TENANT_NAME_CACHE.lock().await;
+            cache.insert(tenant_name, item.clone());
+            Ok(Some(item))
+        }
+        None => Ok(None),
+    }
+}
+
 async fn retrieve_tenant_row_from_header(
     admin_db: &sqlx::MySqlPool,
     request: &HttpRequest,
@@ -492,10 +518,7 @@ async fn retrieve_tenant_row_from_header(
         }));
     }
     // テナントの存在確認
-    sqlx::query_as("SELECT * FROM tenant WHERE name = ?")
-        .bind(tenant_name)
-        .fetch_optional(admin_db)
-        .await
+    get_tenant_row_from_name(admin_db, tenant_name).await
 }
 
 #[derive(Debug, sqlx::FromRow, Clone)]
@@ -1994,6 +2017,8 @@ async fn initialize_handler(admin_db: web::Data<sqlx::MySqlPool>) -> Result<Http
         let mut cache = COMPETITION_CACHE.lock().await;
         cache.clear();
         let mut cache = TENANT_CACHE.lock().await;
+        cache.clear();
+        let mut cache = TENANT_NAME_CACHE.lock().await;
         cache.clear();
         let mut cache = VISIT_HISTORY_CACHE.lock().await;
         cache.clear();
