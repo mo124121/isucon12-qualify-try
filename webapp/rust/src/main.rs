@@ -754,7 +754,7 @@ fn validate_tenant_name(name: &str) -> Result<(), Error> {
     }
 }
 
-#[derive(Debug, Serialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, sqlx::FromRow, Clone)]
 struct BillingReport {
     tenant_id: i64,
     competition_id: String,
@@ -1426,11 +1426,33 @@ async fn billing_handler(
             .bind(v.tenant_id)
             .fetch_all(&mut tenant_db)
             .await?;
+
+    let reports: Vec<BillingReport> =
+        sqlx::query_as("SELECT * FROM billing_report WHERE tenant_id = ?")
+            .bind(v.tenant_id)
+            .fetch_all(&**admin_db)
+            .await?;
+    let mut report_map: HashMap<String, BillingReport> = HashMap::new();
+    for report in reports {
+        report_map.insert(report.competition_id.clone(), report);
+    }
+
     let mut tbrs = Vec::with_capacity(cs.len());
     for comp in cs {
-        let report =
-            billing_report_by_competition(&admin_db, &mut tenant_db, v.tenant_id, &comp.id).await?;
-        tbrs.push(report);
+        if let Some(report) = report_map.get(&comp.id) {
+            tbrs.push(report.clone())
+        } else {
+            tbrs.push(BillingReport {
+                tenant_id: v.tenant_id,
+                competition_id: comp.id,
+                competition_title: comp.title,
+                player_count: 0,
+                visitor_count: 0,
+                billing_player_yen: 0,
+                billing_visitor_yen: 0,
+                billing_yen: 0,
+            });
+        };
     }
 
     let res = SuccessResult {
@@ -1895,7 +1917,7 @@ async fn initialize_handler(admin_db: web::Data<sqlx::MySqlPool>) -> Result<Http
     let queries = vec![
         r#"DROP TABLE IF EXISTS `billing_report`;"#,
         r#"CREATE TABLE `billing_report` (
-  `tenant_id` BIGINT UNSIGNED NOT NULL,
+  `tenant_id` BIGINT NOT NULL,
   `competition_id` VARCHAR(255) NOT NULL,
   `competition_title` VARCHAR(255) NOT NULL,
   `player_count` BIGINT NOT NULL,
