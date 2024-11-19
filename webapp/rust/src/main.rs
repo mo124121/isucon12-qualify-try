@@ -1686,15 +1686,16 @@ async fn competition_ranking_handler(
     let rank_after = query.rank_after.unwrap_or(0);
 
     let pss: Vec<PlayerScoreRow> = sqlx::query_as(
-        "SELECT * FROM player_score WHERE tenant_id = ? AND competition_id = ? ORDER BY score DESC, row_num ASC",
+        "SELECT * FROM player_score WHERE tenant_id = ? AND competition_id = ? ORDER BY score DESC, row_num ASC LIMIT 100 OFFSET ?",
     )
     .bind(tenant.id)
     .bind(&competition_id)
+    .bind(rank_after)
     .fetch_all(&mut tenant_db)
     .await?;
-    let mut paged_ranks = Vec::with_capacity(100);
+    let mut paged_ranks = Vec::with_capacity(pss.len());
 
-    if (pss.len() as i64) < rank_after {
+    if pss.len() == 0 {
         let res = SuccessResult {
             status: true,
             data: CompetitionRankingHandlerResult {
@@ -1712,9 +1713,6 @@ async fn competition_ranking_handler(
 
     for (i, ps) in pss.iter().enumerate() {
         let i = i as i64;
-        if i < rank_after {
-            continue;
-        }
         match retrieve_player(&mut tenant_db, &ps.player_id).await? {
             Some(p) => {
                 paged_ranks.push(CompetitionRank {
