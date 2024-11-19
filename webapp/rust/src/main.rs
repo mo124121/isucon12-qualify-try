@@ -41,7 +41,8 @@ static COMPETITION_CACHE: LazyLock<Mutex<HashMap<(i64, String), CompetitionRow>>
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static TENANT_CACHE: LazyLock<Mutex<HashMap<i64, TenantRow>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
-
+static VISIT_HISTORY_CACHE: LazyLock<Mutex<HashMap<(String, i64, String), i64>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 lazy_static! {
     // 正しいテナント名の正規表現
     static ref TENANT_NAME_REGEXP: Regex = Regex::new(r"^[a-z][a-z0-9-]{0,61}[a-z0-9]$").unwrap();
@@ -1531,6 +1532,35 @@ async fn get_tenant_row(db: &mut MySqlConnection, id: i64) -> sqlx::Result<Tenan
     Ok(item)
 }
 
+async fn update_visit(
+    tx: &mut MySqlConnection,
+    player_id: String,
+    tenant_id: i64,
+    competition_id: String,
+    now: i64,
+) -> Result<(), sqlx::Error> {
+    {
+        let mut cache = VISIT_HISTORY_CACHE.lock().await;
+        if let Some(item) = cache.get(&(player_id.clone(), tenant_id, competition_id.clone())) {
+            if *item <= now {
+                return Ok(());
+            }
+        }
+        cache.insert((player_id.clone(), tenant_id, competition_id.clone()), now);
+    }
+
+    sqlx::query("INSERT INTO visit_history (player_id, tenant_id, competition_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?)")
+        .bind(player_id)
+        .bind(tenant_id)
+        .bind(&competition_id)
+        .bind(now)
+        .bind(now)
+        .execute(&mut *tx)
+        .await?;
+
+    Ok(())
+}
+
 // 参加者向けAPI
 // GET /api/player/competition/:competition_id/ranking
 // 大会ごとのランキングを取得する
@@ -1575,14 +1605,7 @@ async fn competition_ranking_handler(
 
     let tenant = get_tenant_row(&mut tx, v.tenant_id).await?;
 
-    sqlx::query("INSERT INTO visit_history (player_id, tenant_id, competition_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?)")
-        .bind(v.player_id)
-        .bind(tenant.id)
-        .bind(&competition_id)
-        .bind(now)
-        .bind(now)
-        .execute(&mut tx)
-        .await?;
+    update_visit(&mut tx, v.player_id, tenant.id, competition_id.clone(), now).await?;
 
     tx.commit().await?;
 
@@ -1870,6 +1893,8 @@ async fn initialize_handler(admin_db: web::Data<sqlx::MySqlPool>) -> Result<Http
         let mut cache = COMPETITION_CACHE.lock().await;
         cache.clear();
         let mut cache = TENANT_CACHE.lock().await;
+        cache.clear();
+        let mut cache = VISIT_HISTORY_CACHE.lock().await;
         cache.clear();
     }
 
