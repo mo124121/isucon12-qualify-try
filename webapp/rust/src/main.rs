@@ -1003,39 +1003,42 @@ async fn players_add_handler(
 
     let mut tenant_db = connect_to_tenant_db(v.tenant_id).await?;
 
-    let display_names = form_param
+    let display_names: Vec<String> = form_param
         .into_inner()
         .into_iter()
-        .filter_map(|(key, val)| (key == "display_name[]").then(|| val));
-
+        .filter_map(|(key, val)| (key == "display_name[]").then(|| val))
+        .collect();
     let mut pds = Vec::new();
-    for display_name in display_names {
-        let id = dispense_id().await?;
 
+    let mut query_builder: QueryBuilder<sqlx::Sqlite> = QueryBuilder::new(
+        "INSERT INTO player (id, tenant_id, display_name, is_disqualified, created_at, updated_at)",
+    );
+
+    let mut items: Vec<(String, String, i64)> = Vec::new();
+    for name in display_names {
+        let id = dispense_id().await?;
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs() as i64;
-        sqlx::query("INSERT INTO player (id, tenant_id, display_name, is_disqualified, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)")
-            .bind(&id)
-            .bind(v.tenant_id)
-            .bind(display_name)
-            .bind(false)
-            .bind(now)
-            .bind(now)
-            .execute(&mut tenant_db)
-            .await?;
-        let p = retrieve_player(&mut tenant_db, &id).await?;
-        if p.is_none() {
-            return Err(Error::Internal("error retrieve_player".into()));
-        }
-        let p = p.unwrap();
+        items.push((id.clone(), name.clone(), now));
         pds.push(PlayerDetail {
-            id: p.id,
-            display_name: p.display_name,
-            is_disqualified: p.is_disqualified,
+            id,
+            display_name: name,
+            is_disqualified: false,
         });
     }
+
+    query_builder.push_values(items, |mut b, (id, name, now)| {
+        b.push_bind(id)
+            .push_bind(v.tenant_id)
+            .push_bind(name)
+            .push_bind(false)
+            .push_bind(now)
+            .push_bind(now);
+    });
+    let query = query_builder.build();
+    query.execute(&mut tenant_db).await?;
 
     let res = PlayersAddHandlerResult { players: pds };
     Ok(HttpResponse::Ok().json(SuccessResult {
