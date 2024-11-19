@@ -11,9 +11,9 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sqlx::mysql::{MySqlConnectOptions, MySqlDatabaseError};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteConnection};
-use sqlx::{query, Connection, Execute, MySqlConnection, QueryBuilder};
+use sqlx::{Connection, MySqlConnection, QueryBuilder};
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::LazyLock;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -754,8 +754,9 @@ fn validate_tenant_name(name: &str) -> Result<(), Error> {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, sqlx::FromRow)]
 struct BillingReport {
+    tenant_id: i64,
     competition_id: String,
     competition_title: String,
     player_count: i64,        // スコアを登録した参加者数
@@ -825,6 +826,7 @@ async fn billing_report_by_competition(
         }
     }
     Ok(BillingReport {
+        tenant_id,
         competition_id: comp.id,
         competition_title: comp.title,
         player_count,
@@ -852,6 +854,11 @@ struct TenantsBillingHandlerResult {
 #[derive(Debug, Deserialize)]
 struct TenantsBillingHandlerQuery {
     before: Option<i64>,
+}
+
+#[derive(sqlx::FromRow)]
+struct I64Result {
+    billing_yen: i64,
 }
 
 // SaaS管理者用API
@@ -886,31 +893,30 @@ async fn tenants_billing_handler(
     //     scoreが登録されていないplayerでアクセスした人 * 10
     //   を合計したものを
     // テナントの課金とする
+
     let ts: Vec<TenantRow> = sqlx::query_as("SELECT * FROM tenant ORDER BY id DESC")
         .fetch_all(&**admin_db)
         .await?;
 
     let mut tenant_billings = Vec::with_capacity(ts.len());
+
     for t in ts {
         if before_id != 0 && before_id <= t.id {
             continue;
         }
-        let mut tb = TenantWithBilling {
+        let billing_yen = sqlx::query_as::<_, (i64,)>(
+            "SELECT CAST(IFNULL(SUM(billing_yen), 0) AS SIGNED INTEGER) FROM billing_report WHERE tenant_id = ?;",
+        )
+        .bind(t.id)
+        .fetch_one(&**admin_db)
+        .await?
+        .0;
+        let tb = TenantWithBilling {
             id: t.id.to_string(),
             name: t.name,
             display_name: t.display_name,
-            billing_yen: 0,
+            billing_yen,
         };
-        let mut tenant_db = connect_to_tenant_db(t.id).await?;
-        let cs: Vec<CompetitionRow> = sqlx::query_as("SELECT * FROM competition WHERE tenant_id=?")
-            .bind(t.id)
-            .fetch_all(&mut tenant_db)
-            .await?;
-        for comp in cs {
-            let report =
-                billing_report_by_competition(&admin_db, &mut tenant_db, t.id, &comp.id).await?;
-            tb.billing_yen += report.billing_yen;
-        }
         tenant_billings.push(tb);
 
         if tenant_billings.len() >= 10 {
@@ -1208,9 +1214,29 @@ async fn competition_finish_handler(
         .await?;
     {
         let mut cache = COMPETITION_CACHE.lock().await;
-        cache.remove(&(v.tenant_id, id));
+        cache.remove(&(v.tenant_id, id.clone()));
     }
 
+    let report = billing_report_by_competition(&admin_db, &mut tenant_db, v.tenant_id, &id).await?;
+
+    let query = r#"
+        INSERT INTO billing_report (
+            tenant_id, competition_id, competition_title, player_count,
+            visitor_count, billing_player_yen, billing_visitor_yen, billing_yen
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    "#;
+
+    sqlx::query(query)
+        .bind(report.tenant_id)
+        .bind(report.competition_id)
+        .bind(report.competition_title)
+        .bind(report.player_count)
+        .bind(report.visitor_count)
+        .bind(report.billing_player_yen)
+        .bind(report.billing_visitor_yen)
+        .bind(report.billing_yen)
+        .execute(&**admin_db)
+        .await?;
     let res = SuccessResult {
         status: true,
         data: (),
@@ -1347,7 +1373,7 @@ async fn competition_score_handler(
     sqlx::query("DELETE FROM player_score WHERE tenant_id = ? AND competition_id = ?")
         .bind(v.tenant_id)
         .bind(&competition_id)
-        .execute(&mut tx)
+        .execute(&mut *tx)
         .await?;
 
     let mut query_builder:QueryBuilder<sqlx::Sqlite> = QueryBuilder::new("INSERT INTO player_score (id, tenant_id, player_id, competition_id, score, row_num, created_at, updated_at) ");
@@ -1864,6 +1890,56 @@ async fn initialize_handler(admin_db: web::Data<sqlx::MySqlPool>) -> Result<Http
     ];
     for query in queries {
         sqlx::query(&query).execute(&**admin_db).await?;
+    }
+    //請求情報の格納先テーブルの作成
+    let queries = vec![
+        r#"DROP TABLE IF EXISTS `billing_report`;"#,
+        r#"CREATE TABLE `billing_report` (
+  `tenant_id` BIGINT UNSIGNED NOT NULL,
+  `competition_id` VARCHAR(255) NOT NULL,
+  `competition_title` VARCHAR(255) NOT NULL,
+  `player_count` BIGINT NOT NULL,
+  `visitor_count` BIGINT NOT NULL,
+  `billing_player_yen` BIGINT NOT NULL,
+  `billing_visitor_yen` BIGINT NOT NULL,
+  `billing_yen` BIGINT NOT NULL,
+  PRIMARY KEY(`tenant_id`, `competition_id`)
+) ENGINE=InnoDB DEFAULT CHARACTER SET=utf8mb4;"#,
+    ];
+    for query in queries {
+        sqlx::query(&query).execute(&**admin_db).await?;
+    }
+
+    for id in 1..=100 {
+        let mut tenant_db = connect_to_tenant_db(id).await?;
+        let cs: Vec<CompetitionRow> = sqlx::query_as("SELECT * FROM competition WHERE tenant_id=?")
+            .bind(id)
+            .fetch_all(&mut tenant_db)
+            .await?;
+        let query = r#"
+        INSERT INTO billing_report (
+            tenant_id, competition_id, competition_title, player_count,
+            visitor_count, billing_player_yen, billing_visitor_yen, billing_yen
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    "#;
+        for c in cs {
+            if c.finished_at.is_none() {
+                continue;
+            };
+            let report =
+                billing_report_by_competition(&**admin_db, &mut tenant_db, id, &c.id).await?;
+            sqlx::query(query)
+                .bind(report.tenant_id)
+                .bind(report.competition_id)
+                .bind(report.competition_title)
+                .bind(report.player_count)
+                .bind(report.visitor_count)
+                .bind(report.billing_player_yen)
+                .bind(report.billing_visitor_yen)
+                .bind(report.billing_yen)
+                .execute(&**admin_db)
+                .await?;
+        }
     }
 
     //DBのインデックス
